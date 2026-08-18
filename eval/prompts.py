@@ -1,5 +1,4 @@
-"""Prompts for the three LLM-judge metrics (context relevance, faithfulness,
-answer relevancy).
+"""Prompts for the two LLM-judge metrics (faithfulness, answer relevancy).
 
 All run only during an eval pass (scripts/eval.py), never on a live user
 turn - the extra latency is paid once per eval run, the same trade-off
@@ -9,43 +8,6 @@ scripts/demo.py already makes for its latency measurements.
 from __future__ import annotations
 
 from core import safety
-
-# --------------------------------------------------------------------------
-# Context relevance: how much of what was RETRIEVED is actually relevant?
-# Unlike context_recall/context_precision (which check retrieval against a
-# pre-labelled ground-truth section), this needs no labels - it judges each
-# retrieved chunk against the question directly, catching noise that labels
-# can't (e.g. an extra chunk pulled in by top-k widening that happens to
-# share a section with the labelled one but doesn't actually answer anything).
-# --------------------------------------------------------------------------
-CONTEXT_RELEVANCE_SYSTEM = """\
-You are a strict relevance judge. You are given a QUESTION and a list of
-numbered CONTEXT chunks that a retrieval system pulled for it.
-
-TASK
-For each chunk, decide whether it is actually relevant to answering the
-QUESTION - not just topically nearby, but something a good answer would
-actually draw on.
-
-HARD RULES
-1. Judge every chunk. Return exactly one entry per chunk index (0 to N-1).
-2. A chunk is relevant only if it contains information that helps answer the
-   QUESTION. A chunk about a related-but-different topic (e.g. a different
-   product's pricing when asked about deployment modes) is not relevant.
-3. Do not judge by length or how well-written a chunk is - only by whether
-   its content answers the QUESTION.
-"""
-
-CONTEXT_RELEVANCE_USER = """\
-QUESTION
---------
-{question}
-
-CONTEXT CHUNKS
---------------
-{contexts}
-
-Return JSON: {{"judgments": [{{"index": 0, "relevant": true/false}}, ...]}}"""
 
 # --------------------------------------------------------------------------
 # Faithfulness: does every claim in the answer trace back to the context?
@@ -114,8 +76,6 @@ ANSWER
 Return JSON: {{"questions": ["...", "...", "..."]}}"""
 
 safety.register_prompt(
-    CONTEXT_RELEVANCE_SYSTEM,
-    CONTEXT_RELEVANCE_USER,
     FAITHFULNESS_SYSTEM,
     FAITHFULNESS_USER,
     RELEVANCY_SYSTEM,

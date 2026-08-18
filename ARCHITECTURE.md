@@ -79,7 +79,7 @@ gtm_copilot/
 ├── eval/                         # RAGAS-style offline quality evaluation (no LangChain)
 │   ├── metrics.py                    context_recall/precision/relevance, faithfulness, answer_relevancy
 │   ├── dataset.py                    EvalCase, hand-labelled RAG_EVAL_SET
-│   └── prompts.py                    CONTEXT_RELEVANCE_*/FAITHFULNESS_*/RELEVANCY_*
+│   └── prompts.py                    FAITHFULNESS_*/RELEVANCY_*
 │
 ├── scripts/
 │   ├── ingest.py                     builds the RAG index (idempotent)
@@ -1105,15 +1105,14 @@ not just the name.
 
 ## 11. `eval/` — RAGAS-style offline evaluation (no LangChain)
 
-Built to mirror `ragas`'s four best-known metrics without pulling in its
+Built to mirror `ragas`'s best-known metrics without pulling in its
 LangChain dependency. Two are pure functions (no ground-truth-free judge
-needed to reason about them); three need an LLM judge on `ANSWER_MODEL`.
+needed to reason about them); two need an LLM judge on `ANSWER_MODEL`.
 
 ```python
 # eval/metrics.py
 def context_recall(retrieved: list[Section], relevant: list[Section]) -> float: ...
 def context_precision(retrieved: list[Section], relevant: list[Section]) -> float: ...
-def context_relevance(question: str, contexts: list[str], client) -> float | None: ...
 def faithfulness(question, answer, contexts: list[str], client) -> FaithfulnessResult: ...
 def answer_relevancy(question, answer, client, embed_fn) -> float | None: ...
 ```
@@ -1123,11 +1122,15 @@ See §16.6 for exact formulas. `eval/dataset.py` holds hand-labelled
 section), ...]`, a `reference_answer` for human sanity-checking only — no
 metric consumes it). `scripts/eval.py` runs each case through the real
 `GTMCopilot` (no stubs — same philosophy as `scripts/demo.py`), scores all
-five metrics, prints per-question and mean scores, and optionally writes
+four metrics, prints per-question and mean scores, and optionally writes
 `EVALUATION.md`. A misrouted case (actual route ≠ expected) is reported but
 excluded from the metric means — there's nothing meaningful to score against
 a retrieval/answer that wasn't produced by the path the case is meant to
 test.
+
+**Removed**: a `context_relevance` metric (LLM judges each retrieved chunk
+independently for relevance, no ground truth needed) previously lived here
+alongside these four.
 
 ---
 
@@ -1330,13 +1333,12 @@ Both layers must pass; either one can refuse independently.
 ```
 context_recall(retrieved, relevant)    = |retrieved ∩ relevant| / |relevant|         (1.0 if relevant is empty)
 context_precision(retrieved, relevant) = mean over each relevant hit's rank r of (count of relevant hits in retrieved[0..r] / (r+1))
-context_relevance(question, contexts)  = (LLM judges each retrieved chunk independently) fraction judged relevant — no ground truth needed
 faithfulness(answer, contexts)         = (LLM lists every factual claim in the answer) fraction marked supported by contexts
 answer_relevancy(question, answer)     = mean cosine similarity between question and N LLM-generated hypothetical questions the answer would suit
 ```
 
 `context_recall`/`context_precision` need a pre-labelled `relevant_sections`
-set per question (§11's `EvalCase`); the other three need no labels, only an
+set per question (§11's `EvalCase`); the other two need no labels, only an
 LLM judge on `ANSWER_MODEL`. With exactly one labelled-relevant section per
 question (this repo's current dataset shape), `context_recall` reduces to a
 binary hit/miss (equivalent to IR's "Hit Rate") and `context_precision`

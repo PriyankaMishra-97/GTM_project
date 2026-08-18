@@ -2,11 +2,11 @@
 
 Two are pure functions (context recall/precision) - deterministic, no LLM,
 unit-testable with exact-value assertions, but both need a pre-labelled
-ground-truth section per question (see eval/dataset.py). Three need an LLM
-judge (context relevance, faithfulness, answer relevancy) - `ANSWER_MODEL`
-(7B), matching the model-tiering rule already in core/config.py: cheap
-classification goes to the 3B router model, anything needing
-reading-comprehension quality goes to the 7B answer model.
+ground-truth section per question (see eval/dataset.py). Two need an LLM
+judge (faithfulness, answer relevancy) - `ANSWER_MODEL` (7B), matching the
+model-tiering rule already in core/config.py: cheap classification goes to
+the 3B router model, anything needing reading-comprehension quality goes to
+the 7B answer model.
 
 In:  retrieved/relevant (doc, section) pairs, or question+answer+context text.
 Out: a 0.0-1.0 score (context metrics), or None when a score isn't well-defined
@@ -61,45 +61,6 @@ def context_precision(retrieved: Sequence[Section], relevant: Sequence[Section])
             hits += 1
             precisions.append(hits / (rank + 1))
     return sum(precisions) / len(precisions) if precisions else 0.0
-
-
-# --------------------------------------------------------------------------
-# Context relevance - needs an LLM judge, no ground-truth labels required.
-# --------------------------------------------------------------------------
-class ChunkJudgment(BaseModel):
-    index: int
-    relevant: bool
-
-
-class ContextRelevanceJudgment(BaseModel):
-    judgments: list[ChunkJudgment] = Field(default_factory=list)
-
-
-def context_relevance(question: str, contexts: Sequence[str], client: LLMClient) -> float | None:
-    """Fraction of the RETRIEVED chunks that are actually relevant to `question`.
-
-    Unlike context_recall/context_precision, this needs no labelled
-    ground-truth set - it catches noise (irrelevant chunks that made it into
-    top-k) that a label-based metric can't see, at the cost of depending on
-    judge quality rather than being exact.
-    """
-    if not contexts:
-        return None
-    numbered = "\n\n".join(f"[{i}] {c}" for i, c in enumerate(contexts))
-    try:
-        judgment = client.chat_json(
-            prompts.CONTEXT_RELEVANCE_SYSTEM,
-            prompts.CONTEXT_RELEVANCE_USER.format(question=question, contexts=numbered),
-            ContextRelevanceJudgment,
-            model=client.answer_model,
-        )
-    except (LLMJSONError, LLMUnavailable):
-        return None
-
-    if not judgment.judgments:
-        return None
-    relevant = sum(1 for j in judgment.judgments if j.relevant)
-    return relevant / len(judgment.judgments)
 
 
 # --------------------------------------------------------------------------

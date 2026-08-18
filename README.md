@@ -69,7 +69,7 @@ The system is a **routed pipeline, not a free-form agent**: one user turn takes 
 | `sql/` | `schema.py` (introspection + generated card), `generate.py`, `guard.py`, `execute.py`, `narrate.py`, `pipeline.py`, `prompts.py` |
 | `hybrid/` | `pipeline.py` (fixed 4 steps), `composer.py`, `verify.py` (verbatim-number check), `prompts.py` |
 | `ask/` | `clarify.py`, `reframe.py` (continuation-vs-pivot after an ASK), `history_reframe.py` (resolves follow-ups like "and for EMEA?" against the last 1-2 answered turns, when NOT following an ASK), `text_overlap.py` (shared merge-safety guards), `prompts.py` |
-| `eval/` | `metrics.py` (RAGAS-style context recall/precision/relevance, faithfulness, answer relevancy), `dataset.py`, `prompts.py` — offline quality evaluation, no LangChain |
+| `eval/` | `metrics.py` (RAGAS-style context recall/precision, faithfulness, answer relevancy), `dataset.py`, `prompts.py` — offline quality evaluation, no LangChain |
 | `orchestrator.py` | wires the above; the only entry point the UI uses |
 | `scripts/` | `ingest.py` (build the index), `demo.py` (headless 5-route run + latency report), `eval.py` (runs `eval/` against the real stack → `EVALUATION.md`) |
 | `tests/` | `run_all.py` single entry; guard, RRF, number-check, chunking, router, safety, DB integration, reframe, eval metrics, offline end-to-end pipeline |
@@ -222,7 +222,6 @@ python -m scripts.eval --md EVALUATION.md   # also write a report
 |---|---|---|
 | Context Recall | No (pure function) | did retrieval find the labelled-relevant chunk at all |
 | Context Precision | No (pure function) | did it rank early, or get buried past the top-k cutoff |
-| Context Relevance | Yes | how much of what was retrieved is noise (no ground truth needed) |
 | Faithfulness | Yes | does every claim in the answer trace back to retrieved context |
 | Answer Relevancy | Yes | does the answer actually address the question asked |
 

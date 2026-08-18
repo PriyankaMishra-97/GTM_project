@@ -16,7 +16,6 @@ from eval.metrics import (
     answer_relevancy,
     context_precision,
     context_recall,
-    context_relevance,
     faithfulness,
 )
 
@@ -84,39 +83,6 @@ def test_context_precision_is_zero_on_a_total_miss() -> None:
 
 def test_context_precision_is_zero_on_empty_retrieval() -> None:
     assert context_precision([], [STAGE_PLAYBOOK]) == 0.0
-
-
-# -------------------------------------------------------------- context relevance --
-def test_context_relevance_scores_fraction_of_chunks_judged_relevant() -> None:
-    client = StubClient(
-        {
-            "judgments": [
-                {"index": 0, "relevant": True},
-                {"index": 1, "relevant": False},
-                {"index": 2, "relevant": True},
-            ]
-        }
-    )
-    score = context_relevance("What deployment modes?", ["ctx0", "ctx1", "ctx2"], client)
-    assert score == 2 / 3
-
-
-def test_context_relevance_is_none_with_no_retrieved_chunks() -> None:
-    """No chunks retrieved isn't 'perfectly relevant' or 'perfectly irrelevant' -
-    it's a different failure (retrieval found nothing) that context_recall
-    already reports as 0.0; this metric abstains rather than double-count it."""
-    client = StubClient({"judgments": []})
-    assert context_relevance("q", [], client) is None
-
-
-def test_context_relevance_is_none_when_the_judge_returns_no_judgments() -> None:
-    client = StubClient({"judgments": []})
-    assert context_relevance("q", ["ctx0"], client) is None
-
-
-def test_context_relevance_is_none_when_the_judge_is_unavailable() -> None:
-    client = StubClient(raises=True)
-    assert context_relevance("q", ["ctx0"], client) is None
 
 
 # ---------------------------------------------------------------- faithfulness --

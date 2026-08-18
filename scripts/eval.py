@@ -4,11 +4,11 @@
     python -m scripts.eval --md out.md   # also write an EVALUATION.md report
 
 Role: measures what tests/test_router_golden.py does not - whether retrieval
-found the right context (context recall/precision), whether what it found is
-free of noise (context relevance), and whether the generated answer is
-actually grounded in it (faithfulness) and on-topic (answer relevancy). See
-eval/metrics.py for each metric's definition and eval/dataset.py for the
-labelled question set. Mirrors scripts/demo.py's structure.
+found the right context (context recall/precision), and whether the
+generated answer is actually grounded in it (faithfulness) and on-topic
+(answer relevancy). See eval/metrics.py for each metric's definition and
+eval/dataset.py for the labelled question set. Mirrors scripts/demo.py's
+structure.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ from eval.metrics import (
     answer_relevancy,
     context_precision,
     context_recall,
-    context_relevance,
     faithfulness,
 )
 from orchestrator import get_copilot
@@ -58,7 +57,6 @@ def main(argv: list[str] | None = None) -> int:
             "route": answer.route,
             "context_recall": None,
             "context_precision": None,
-            "context_relevance": None,
             "faithfulness": None,
             "answer_relevancy": None,
             "claims": [],
@@ -77,7 +75,6 @@ def main(argv: list[str] | None = None) -> int:
 
         row["context_recall"] = context_recall(retrieved, list(case.relevant_sections))
         row["context_precision"] = context_precision(retrieved, list(case.relevant_sections))
-        row["context_relevance"] = context_relevance(case.question, contexts, copilot.client)
 
         faith = faithfulness(case.question, answer.text, contexts, copilot.client)
         row["faithfulness"] = faith.score
@@ -90,7 +87,6 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"[{answer.route:6}] recall={_fmt(row['context_recall'])} "
             f"precision={_fmt(row['context_precision'])} "
-            f"relevance={_fmt(row['context_relevance'])} "
             f"faithfulness={_fmt(row['faithfulness'])} "
             f"relevancy={_fmt(row['answer_relevancy'])}  {case.question[:50]}"
         )
@@ -100,7 +96,6 @@ def main(argv: list[str] | None = None) -> int:
     for metric in (
         "context_recall",
         "context_precision",
-        "context_relevance",
         "faithfulness",
         "answer_relevancy",
     ):
@@ -128,18 +123,18 @@ def _write_report(path: Path, rows: list[dict]) -> None:
         "which hard-depends on LangChain. See `eval/metrics.py` for each "
         "definition. `context_recall`/`context_precision` are deterministic "
         "(no LLM, need a pre-labelled ground-truth section); "
-        "`context_relevance`/`faithfulness`/`answer_relevancy` use an LLM judge "
+        "`faithfulness`/`answer_relevancy` use an LLM judge "
         "(no labels needed) and are therefore approximate, not exact.",
         "",
-        "| Route | Question | Recall | Precision | Relevance | Faithfulness | Relevancy |",
-        "|---|---|---:|---:|---:|---:|---:|",
+        "| Route | Question | Recall | Precision | Faithfulness | Relevancy |",
+        "|---|---|---:|---:|---:|---:|",
     ]
     for r in rows:
         q = r["question"][:60] + ("..." if len(r["question"]) > 60 else "")
         route = r["route"] if r["route"] == r["expected_route"] else f"{r['route']} (expected {r['expected_route']})"
         lines.append(
             f"| {route} | {q} | {_fmt(r['context_recall'])} | "
-            f"{_fmt(r['context_precision'])} | {_fmt(r['context_relevance'])} | "
+            f"{_fmt(r['context_precision'])} | "
             f"{_fmt(r['faithfulness'])} | {_fmt(r['answer_relevancy'])} |"
         )
 
@@ -147,7 +142,6 @@ def _write_report(path: Path, rows: list[dict]) -> None:
     for metric in (
         "context_recall",
         "context_precision",
-        "context_relevance",
         "faithfulness",
         "answer_relevancy",
     ):
