@@ -32,6 +32,25 @@ def test_short_coincidental_overlap_is_not_a_leak() -> None:
     assert safety.find_prompt_leak("Answer only from the provided context.") is None
 
 
+def test_contradiction_example_echo_is_not_a_leak() -> None:
+    """Real case: "What deployment modes does Product XYZ support?" produced a
+    correct contradiction answer that closely echoes RAG_SYSTEM's own worked
+    example - it must not be treated as a leaked system prompt (rag/prompts.py)."""
+    answer = (
+        "As of v3.0, Product XYZ supports Cloud, On-Prem, and Hybrid deployment "
+        "modes. [Enablement Pack, p.1] **Conflict:** the legacy note says that "
+        "Product XYZ supports Cloud-only deployments [Enablement Pack, p.1]. "
+        "Treat the v3.0 statement as current and confirm with the doc owner."
+    )
+    assert safety.filter_response(answer) == answer
+
+
+def test_contradiction_example_excluded_from_registered_corpus() -> None:
+    assert not any(
+        rag_prompts._CONTRADICTION_EXAMPLE in t for t in safety._REGISTERED_PROMPTS
+    )
+
+
 def test_column_denylist_strips_columns(monkeypatch) -> None:
     monkeypatch.setattr(config, "COLUMN_DENYLIST", frozenset({"annual_revenue_usd"}))
     cols, rows = safety.strip_denied_columns(
