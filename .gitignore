@@ -1,0 +1,12 @@
+# Only derived artefacts are ignored. assets/ ships with the repo: the PDFs and
+# gtm_mock.db are provided, synthetic, and required to run the demo.
+storage/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+
+# Real user credentials/ACLs - never commit password hashes. See
+# assets/users.example.yaml for the template.
+assets/users.yaml

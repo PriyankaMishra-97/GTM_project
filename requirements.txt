@@ -1,0 +1,32 @@
+# Pinned for determinism (NFR: repeatable results across runs/machines).
+# No LangChain / LlamaIndex on purpose - every pipeline step stays inspectable.
+
+# --- LLM transport (Ollama HTTP API) ---
+requests==2.32.3
+
+# --- structured LLM output validation ---
+pydantic==2.9.2
+
+# --- PDF parsing for RAG ingest ---
+PyMuPDF==1.24.11
+
+# --- dense retrieval ---
+sentence-transformers==3.2.1
+chromadb==0.5.20
+
+# --- lexical retrieval ---
+rank-bm25==0.2.2
+
+# --- SQL safety: AST parsing, not regex ---
+sqlglot==25.24.0
+
+# --- UI ---
+streamlit==1.39.0
+pandas==2.2.3
+
+# --- auth: password hashing + user config ---
+bcrypt==5.0.0
+PyYAML==6.0.3
+
+# --- tests ---
+pytest==8.3.3

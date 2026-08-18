@@ -1,0 +1,18 @@
+# Template for assets/users.yaml (gitignored - never commit real credentials).
+# Copy this file to users.yaml and replace the placeholder hash(es) below.
+#
+# Generate a hash:
+#   python -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()).decode())"
+#
+# allowed_regions / allowed_segments: a list of allowed values, or ["all"]
+# (or omit the key entirely) for unrestricted access. A user must have BOTH
+# set to ["all"]/omitted to be fully unrestricted.
+users:
+  alice:
+    password_hash: "$2b$12$REPLACE_WITH_A_REAL_BCRYPT_HASH"
+    allowed_regions: ["all"]
+    allowed_segments: ["all"]
+  bob:
+    password_hash: "$2b$12$REPLACE_WITH_A_REAL_BCRYPT_HASH"
+    allowed_regions: ["NA", "EMEA"]
+    allowed_segments: ["all"]
