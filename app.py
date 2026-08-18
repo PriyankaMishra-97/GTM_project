@@ -22,24 +22,37 @@ st.set_page_config(page_title="GTM Analyst Copilot", page_icon="📊", layout="w
 
 # ------------------------------------------------------------------- login --
 if "user" not in st.session_state:
-    st.title("GTM Analyst Copilot")
     try:
         _store = UserStore()
     except UsersFileMissing as exc:
         st.error(str(exc))
         st.stop()
 
-    with st.form("login"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Log in")
-    if submitted:
-        profile = _store.authenticate(username, password)
-        if profile is None:
-            st.error("Incorrect username or password.")
-        else:
-            st.session_state.user = profile
-            st.rerun()
+    _, center, _ = st.columns([1, 1.1, 1])
+    with center:
+        st.markdown(
+            "<div style='text-align:center;padding-top:3rem;'>"
+            "<span style='font-size:2.4rem;'>📊</span>"
+            "<h2 style='margin:0.3rem 0 0;'>GTM Analyst Copilot</h2>"
+            "<p style='color:#57606a;margin-top:0.2rem;'>Sign in to continue</p>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        with st.container(border=True):
+            with st.form("login"):
+                username = st.text_input("Username", placeholder="Enter your username")
+                password = st.text_input(
+                    "Password", type="password", placeholder="Enter your password"
+                )
+                submitted = st.form_submit_button("Log in", use_container_width=True)
+        if submitted:
+            with st.spinner("Signing in..."):
+                profile = _store.authenticate(username, password)
+            if profile is None:
+                st.error("Incorrect username or password.")
+            else:
+                st.session_state.user = profile
+                st.rerun()
     st.stop()
 
 user: UserProfile = st.session_state.user
