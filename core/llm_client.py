@@ -254,6 +254,7 @@ class OllamaClient(LLMClient):
             "model": model,
             "messages": [{"role": "system", "content": system}, *messages],
             "stream": False,
+            "keep_alive": config.LLM_KEEP_ALIVE,
             "options": {
                 # Determinism triad: temperature 0 + fixed seed + greedy top_k.
                 "temperature": config.LLM_TEMPERATURE,
@@ -261,6 +262,7 @@ class OllamaClient(LLMClient):
                 "top_k": 1,
                 "top_p": 1.0,
                 "num_predict": config.LLM_MAX_TOKENS,
+                "num_ctx": config.LLM_NUM_CTX,
             },
         }
         if json_schema is not None:

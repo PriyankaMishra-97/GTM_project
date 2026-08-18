@@ -21,31 +21,13 @@ Out: `ReframeDecision` (pydantic) - is_new_topic + the effective question.
 
 from __future__ import annotations
 
-import re
-
 from pydantic import BaseModel
 
 from ask import prompts
+from ask.text_overlap import content_words, preserves_content
 from core.llm_client import LLMClient, LLMJSONError, LLMUnavailable, get_client
 from core.trace import Trace
 from router.slots import SLOT_QUESTIONS
-
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
-_STOPWORDS = frozenset(
-    {
-        "this", "that", "what", "which", "does", "should", "have", "with",
-        "many", "about", "into", "from", "were", "will", "would", "could",
-        "when", "where",
-    }
-)
-
-
-def _content_words(text: str) -> set[str]:
-    """Words a merge must not silently drop - short/common words excluded."""
-    return {
-        w for w in _TOKEN_RE.findall(text.lower())
-        if len(w) > 3 and w not in _STOPWORDS
-    }
 
 
 class ReframeDecision(BaseModel):
@@ -120,12 +102,10 @@ class Reframer:
         # keep most of the pending question's content AND actually incorporate
         # the reply's own content - if either fails, fall back to blind
         # concatenation over a fluent but incomplete or stale merge.
-        merged_words = _content_words(candidate.effective_question)
-        pending_words = _content_words(pending_question)
-        reply_words = _content_words(reply)
-        pending_ok = not pending_words or len(pending_words & merged_words) / len(pending_words) >= 0.6
-        reply_ok = not reply_words or reply_words & merged_words
-        if not (pending_ok and reply_ok):
+        merged_words = content_words(candidate.effective_question)
+        pending_words = content_words(pending_question)
+        reply_words = content_words(reply)
+        if not preserves_content(pending_words, reply_words, merged_words):
             trace.error(
                 "reframe: merged question dropped pending or reply content - "
                 "using blind concatenation instead"

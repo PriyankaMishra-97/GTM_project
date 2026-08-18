@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ask.clarify import Clarifier
+from ask.history_reframe import HistoryReframer
 from ask.reframe import Reframer
 from core import config
 from core.auth import UserProfile
@@ -79,6 +80,7 @@ class GTMCopilot:
         self.rag_path = RagPath(self.retriever, self.client)
         self.clarifier = Clarifier(self.client)
         self.reframer = Reframer(self.client)
+        self.history_reframer = HistoryReframer(self.client)
 
         # SQL/HYBRID paths are per-user: each carries a guard bound to that
         # user's region/segment ACL (ScopedQueryGuardRule), so they cannot be
@@ -129,6 +131,7 @@ class GTMCopilot:
         user: UserProfile,
         pending_clarification: str | None = None,
         pending_missing_slots: list[str] | None = None,
+        recent_turns: list[dict] | None = None,
     ) -> Answer:
         """Run one full turn.
 
@@ -138,6 +141,12 @@ class GTMCopilot:
         standalone question) or pivots to something unrelated (route it
         alone) - see ask/reframe.py for why that's a separate call rather than
         part of the main router prompt.
+
+        `recent_turns` is the caller's record of the last (up to 2) turns that
+        produced a real SQL/RAG/HYBRID answer, used ONLY when this turn does
+        NOT follow an ASK - see ask/history_reframe.py. The two mechanisms are
+        mutually exclusive (this if/elif is the guarantee): a turn following
+        an ASK never also consults recent_turns, and vice versa.
         """
         trace = Trace(question=question, user=user.username)
 
@@ -150,6 +159,13 @@ class GTMCopilot:
             trace.is_new_topic = reframe_decision.is_new_topic
             effective_question = (
                 question if reframe_decision.is_new_topic else reframe_decision.effective_question
+            )
+            trace.question = effective_question
+        elif recent_turns:
+            history_decision = self.history_reframer.reframe(recent_turns, question, trace)
+            trace.history_reframe_applied = not history_decision.is_new_topic
+            effective_question = (
+                question if history_decision.is_new_topic else history_decision.effective_question
             )
             trace.question = effective_question
 
@@ -277,9 +293,10 @@ def answer_question(
     client: LLMClient | None = None,
     pending_clarification: str | None = None,
     pending_missing_slots: list[str] | None = None,
+    recent_turns: list[dict] | None = None,
 ) -> Answer:
     return get_copilot(client).answer(
-        question, user, pending_clarification, pending_missing_slots
+        question, user, pending_clarification, pending_missing_slots, recent_turns
     )
 
 

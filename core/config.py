@@ -61,6 +61,18 @@ LLM_TIMEOUT_S: int = 180
 # num_predict caps runaway generation (a local 7B can otherwise ramble past the
 # 10s latency target). Generous enough for a cited multi-paragraph answer.
 LLM_MAX_TOKENS: int = 1024
+# Ollama defaults num_ctx to the MODEL's own built-in context length when unset
+# (131072 for llama3.2:3b, 32768 for qwen2.5:7b per `ollama show`) - wildly
+# oversized for this system's actual prompts (schema card + question, or a
+# handful of retrieved chunks: a few thousand tokens at most). Allocating a
+# 32k-131k KV cache on every call inflates load time and, on a memory-
+# constrained machine, creates pressure that can evict the OTHER tier's model
+# between calls. 4096 covers every prompt this system sends with headroom.
+LLM_NUM_CTX: int = 4096
+# Ollama's default keep_alive (5 minutes) unloads an idle model, so any gap
+# between chat turns pays full reload cost again. Keeping both tiers resident
+# longer avoids that - cheap on RAM now that num_ctx isn't oversized.
+LLM_KEEP_ALIVE: str = "30m"
 
 # --------------------------------------------------------------------------
 # Retrieval

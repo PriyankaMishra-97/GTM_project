@@ -102,3 +102,76 @@ USER'S NEW MESSAGE
 Return JSON: {{"is_new_topic": true/false, "effective_question": "..."}}"""
 
 safety.register_prompt(REFRAME_SYSTEM, REFRAME_USER)
+
+# --------------------------------------------------------------------------
+# History reframe: decide whether a NEW message (not following an ASK) is a
+# self-contained question, or an elliptical follow-up to the last 1-2
+# answered turns. See ask/history_reframe.py for why this is a separate,
+# mutually-exclusive path from REFRAME_SYSTEM above (which only ever runs
+# right after an ASK).
+# --------------------------------------------------------------------------
+HISTORY_REFRAME_SYSTEM = """\
+You decide whether a user's new message is a self-contained new question, or
+an elliptical follow-up that depends on the last 1-2 exchanges to be
+understood. You do not answer either question.
+
+HARD RULES
+1. If the new message omits something (a stage, region, segment, product,
+   time range, or metric) that was explicit in a recent exchange, it CONTINUES
+   that exchange. Combine them into ONE standalone question that keeps the
+   most recent relevant exchange's full intent AND injects the new message's
+   detail. Never drop a clause the prior question already specified.
+2. If the new message is JUST a bare name ("what about X", "and in X", "X?")
+   naming a DIFFERENT specific stage/region/product than the recent exchange
+   used, it means "ask the SAME question, but about X instead." Substitute X
+   for the old item in the most recent relevant question's structure - do
+   NOT treat X as a vague new topic to define generically, and do NOT keep
+   the OLD item's name anywhere in the result.
+3. If the new message is already a complete question on its own, or asks
+   about something unrelated to the recent exchanges, it is NOT a follow-up.
+   Set is_new_topic to true and return the new message UNCHANGED.
+4. When genuinely unsure whether the recent exchanges are relevant - in
+   particular, if none of them actually mention the thing the new message
+   seems to reference - prefer is_new_topic=true and leave the question as
+   typed. NEVER invent a stage, region, segment, product, or other specific
+   value that does not appear in the recent exchanges or the new message
+   itself, even if something similar would make a plausible-sounding
+   question. A wrong invented value is worse than asking the user to
+   rephrase.
+5. Never answer either question.
+
+EXAMPLE 1 - missing metric, same item (illustrative - names are placeholders)
+------------------------------------------------------------------------------
+RECENT EXCHANGES:
+Q: "What is the exit criteria for the Zeta stage?"
+A: "The exit criteria for the Zeta stage are: widget validated; demo aligns
+to plan. [Placeholder Doc, p.9]"
+NEW MESSAGE: "What is the SLA days?"
+CORRECT effective_question: "What is the SLA days for the Zeta stage?"
+
+EXAMPLE 2 - bare name, different item, SAME question structure (rule 2)
+--------------------------------------------------------------------------
+RECENT EXCHANGES:
+Q: "What is the exit criteria for the Zeta stage?"
+A: "The exit criteria for the Zeta stage are: widget validated; demo aligns
+to plan. [Placeholder Doc, p.9]"
+NEW MESSAGE: "what about Omega"
+CORRECT effective_question: "What is the exit criteria for the Omega stage?"
+WRONG (treats the name as a vague new topic instead of substituting it):
+"What is the meaning of 'Omega' in this context?"
+WRONG (keeps the old item instead of substituting): "What is the exit
+criteria for the Zeta stage, and what about Omega?"
+"""
+
+HISTORY_REFRAME_USER = """\
+RECENT EXCHANGES (oldest first, at most 2)
+-------------------------------------------
+{history}
+
+NEW MESSAGE
+-----------
+{question}
+
+Return JSON: {{"is_new_topic": true/false, "effective_question": "..."}}"""
+
+safety.register_prompt(HISTORY_REFRAME_SYSTEM, HISTORY_REFRAME_USER)

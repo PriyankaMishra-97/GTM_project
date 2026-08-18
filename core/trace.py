@@ -43,9 +43,20 @@ class Trace:
     turn_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     user: str | None = None  # logged-in username, for the audit trail
 
+    # `question` gets overwritten with the effective/routed question whenever
+    # either reframe path below fires - `raw_question` is set once (to the
+    # same initial value) and never mutated again, so the user's literal
+    # input for this turn is never lost from the trace even after a rewrite.
+    raw_question: str | None = None
+
     # --- reframe (only set when this turn followed an ASK) ---
     pending_question: str | None = None  # the carried-over question this turn started with
     is_new_topic: bool | None = None  # Reframer's verdict; None = no pending question existed
+
+    # --- history reframe (only set when this turn did NOT follow an ASK and
+    # recent_turns was available) - mutually exclusive with the two fields
+    # above; see orchestrator.py's if/elif ---
+    history_reframe_applied: bool | None = None
 
     # --- routing ---
     llm_proposed_route: str | None = None
@@ -83,6 +94,10 @@ class Trace:
     llm_calls: list[dict[str, Any]] = field(default_factory=list)
 
     _t0: float = field(default_factory=time.perf_counter, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.raw_question is None:
+            self.raw_question = self.question
 
     @contextmanager
     def stage(self, name: str) -> Iterator[None]:

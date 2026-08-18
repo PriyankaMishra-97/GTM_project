@@ -14,6 +14,11 @@ RULES (in order)
   R0B_OFF_DOMAIN   - router proposed OFF_TOPIC -> REFUSE, out of scope.
   R0C_HYBRID_NO_SQL- HYBRID proposal with no sql_subquestion -> RAG (it isn't
                      really hybrid; nothing to compute).
+  R0D_INVALID_POPULATION - segment_or_region filled with something that isn't
+                     a real region/segment enum value -> cleared, so
+                     R1_MISSING_SLOT (next) asks for it properly instead of
+                     R1B_REGION_SCOPE refusing with a confusing message about
+                     a "region" that was never real.
   R1_MISSING_SLOT  - SQL/HYBRID with a required slot unfilled -> ASK.
   R1B_REGION_SCOPE - SQL/HYBRID names a region/segment outside the logged-in
                      user's allowed scope -> REFUSE; "all" narrows in place to
@@ -35,6 +40,7 @@ from core import config
 from core.auth import UserProfile
 from router.llm_router import RouterDecision
 from router import slots as slot_lib
+from sql.schema import REGIONS, SEGMENTS
 
 # Write/destructive intent. Matched on word boundaries so "updated pricing note"
 # or "insertion" do not trip it.
@@ -201,6 +207,41 @@ class HybridWithoutSqlRule(RoutingRule):
         )
 
 
+class InvalidPopulationValueRule(RoutingRule):
+    """R0D - a segment_or_region value that isn't a real enum member is a
+    router hallucination, not a legitimate request for an out-of-scope
+    region. Clears it so R1_MISSING_SLOT (next) correctly treats it as
+    missing and asks, instead of R1B_REGION_SCOPE refusing with a message
+    about a "region" that was never real.
+
+    Real case: for the follow-up "and in Discover?", the router proposed
+    HYBRID with slots={"segment_or_region": "Discover"} - "Discover" is a
+    Field Guide stage name, not a region or segment, but it superficially
+    resembled the shape of a near-identical few-shot example ("win rate for
+    Enterprise..."), and the router copied that example's structure with
+    "Discover" substituted into the wrong slot. Left unchecked, this reached
+    R1B_REGION_SCOPE and refused with "You don't have access to Discover" -
+    confusing, since Discover was never a real region/segment to begin with.
+    """
+
+    rule_id = "R0D_INVALID_POPULATION_VALUE"
+
+    _VALID = {r.lower() for r in REGIONS} | {s.lower() for s in SEGMENTS}
+
+    def evaluate(
+        self, decision: RouterDecision, question: str, user: UserProfile
+    ) -> RoutingOutcome | None:
+        if decision.route not in ("SQL", "HYBRID"):
+            return None
+        value = decision.slots.get(slot_lib.SEGMENT_OR_REGION)
+        if not slot_lib.is_filled(value) or isinstance(value, (list, tuple, set, frozenset)):
+            return None  # missing (R1's job), or already a narrowed list (R1B's job)
+        if str(value).strip().lower() in self._VALID or str(value).strip().lower() == "all":
+            return None
+        decision.slots[slot_lib.SEGMENT_OR_REGION] = None
+        return None
+
+
 class MissingSlotRule(RoutingRule):
     """R1 - a quantitative route with an unfilled required slot cannot be correct.
 
@@ -343,6 +384,7 @@ class RuleEngine:
         WriteIntentRule,
         OffDomainRule,
         HybridWithoutSqlRule,
+        InvalidPopulationValueRule,
         MissingSlotRule,
         RegionScopeRule,
         VagueTimeRule,

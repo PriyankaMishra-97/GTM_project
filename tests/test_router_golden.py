@@ -100,6 +100,35 @@ def test_r0c_does_not_fire_on_a_real_hybrid_proposal() -> None:
     assert out.rule_id is None
 
 
+def test_r0d_hallucinated_segment_value_becomes_missing_not_refused() -> None:
+    """Real case: for the follow-up "and in Discover?", the router copied a
+    near-identical few-shot example's structure and put "Discover" (a Field
+    Guide stage name, not a region/segment) into segment_or_region. Must
+    become a missing-slot ASK, not R1B_REGION_SCOPE's confusing "you don't
+    have access to Discover" refusal - Discover was never a real region."""
+    out = _apply(
+        _decision(
+            "HYBRID",
+            slots={"time_range": "2024", "segment_or_region": "Discover"},
+            doc_subquestion="what gates a deal before the Commit stage",
+            sql_subquestion="win rate for Discover in 2024",
+        ),
+        "and in Discover?",
+    )
+    assert out.final_route == "ASK"
+    assert out.rule_id == "R1_MISSING_SLOT"
+    assert "segment_or_region" in out.missing_slots
+
+
+def test_r0d_does_not_fire_on_a_real_region_or_all() -> None:
+    out = _apply(
+        _decision("SQL", slots={"time_range": "2024", "segment_or_region": "EMEA"}),
+        "how many opportunities were Closed Won in EMEA in 2024?",
+    )
+    assert out.final_route == "SQL"
+    assert out.rule_id is None
+
+
 def test_r1_stage_question_does_not_need_a_stage_definition() -> None:
     """stage_definition is auto-resolved by route (SQL -> database stages,
     doc -> playbook), not asked for - see router/slots.py::required_slots."""

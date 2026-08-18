@@ -61,6 +61,25 @@ def route_badge(route: str) -> str:
     )
 
 
+def recent_answered_turns(messages: list[dict], limit: int = 2) -> list[dict]:
+    """Last `limit` (question, answer) pairs from real SQL/RAG/HYBRID turns.
+
+    ASK/REFUSE turns carry no factual content worth referencing (see
+    ask/history_reframe.py's module docstring), so they're skipped here -
+    only an answered turn is worth feeding to the history-reframe step.
+    """
+    turns: list[dict] = []
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if msg["role"] == "assistant" and msg.get("route") in ("SQL", "RAG", "HYBRID"):
+            if i > 0 and messages[i - 1]["role"] == "user":
+                turns.append({"question": messages[i - 1]["content"], "answer": msg["content"]})
+        if len(turns) >= limit:
+            break
+    turns.reverse()
+    return turns
+
+
 # ---------------------------------------------------------------- sidebar --
 with st.sidebar:
     st.header("GTM Analyst Copilot")
@@ -148,6 +167,7 @@ if prompt := st.chat_input("Ask about Product XYZ, the tracker, or the GTM pipel
                 user=user,
                 pending_clarification=st.session_state.pending_clarification,
                 pending_missing_slots=st.session_state.pending_missing_slots,
+                recent_turns=recent_answered_turns(st.session_state.messages),
             )
         if answer.route == "ASK":
             st.session_state.pending_clarification = answer.trace.question

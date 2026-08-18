@@ -324,3 +324,75 @@ def test_continuation_still_merges_correctly_with_the_reframe_step_in_place() ->
     )
     assert turn2.trace.is_new_topic is False
     assert turn2.trace.question == "How's pipeline looking? EMEA 2024"
+
+
+def test_ask_reframe_and_history_reframe_are_mutually_exclusive() -> None:
+    """Regression for the collision decision: a turn that follows an ASK must
+    use ONLY ask/reframe.py's Reframer, even if recent_turns is ALSO supplied
+    (e.g. a caller that doesn't bother clearing it). ask/history_reframe.py's
+    HistoryReframer must never be consulted on the same turn."""
+    client = StubClient(
+        router_json={
+            "route": "SQL", "missing_slots": [], "confidence": 0.9, "rationale": "x",
+            "slots": {}, "doc_subquestion": None, "sql_subquestion": None,
+        },
+        reframe_json={
+            "is_new_topic": False,
+            "effective_question": "How's pipeline looking? EMEA 2024",
+        },
+    )
+    copilot = _copilot(client)
+
+    calls = []
+    original = copilot.history_reframer.reframe
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    copilot.history_reframer.reframe = spy
+
+    turn1 = copilot.answer("How's pipeline looking?", UNRESTRICTED_USER)
+    assert turn1.route == "ASK"
+
+    turn2 = copilot.answer(
+        "EMEA 2024",
+        UNRESTRICTED_USER,
+        pending_clarification=turn1.trace.question,
+        pending_missing_slots=turn1.trace.missing_slots,
+        recent_turns=[{"question": "unrelated prior turn", "answer": "unrelated prior answer"}],
+    )
+
+    assert calls == [], "HistoryReframer must not run when pending_clarification is set"
+    assert turn2.trace.is_new_topic is False
+    assert turn2.trace.history_reframe_applied is None
+    assert turn2.trace.question == "How's pipeline looking? EMEA 2024"
+
+
+def test_raw_question_survives_a_reframe_rewrite() -> None:
+    """trace.question gets overwritten with the effective/reframed question
+    on either reframe path - raw_question must still show the user's literal
+    input for the turn, never mutated."""
+    client = StubClient(
+        router_json={
+            "route": "SQL", "missing_slots": [], "confidence": 0.9, "rationale": "x",
+            "slots": {}, "doc_subquestion": None, "sql_subquestion": None,
+        },
+        reframe_json={
+            "is_new_topic": False,
+            "effective_question": "How's pipeline looking? EMEA 2024",
+        },
+    )
+    copilot = _copilot(client)
+
+    turn1 = copilot.answer("How's pipeline looking?", UNRESTRICTED_USER)
+    assert turn1.trace.raw_question == "How's pipeline looking?"
+
+    turn2 = copilot.answer(
+        "EMEA 2024",
+        UNRESTRICTED_USER,
+        pending_clarification=turn1.trace.question,
+        pending_missing_slots=turn1.trace.missing_slots,
+    )
+    assert turn2.trace.raw_question == "EMEA 2024"
+    assert turn2.trace.question == "How's pipeline looking? EMEA 2024"
