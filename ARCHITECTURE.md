@@ -41,7 +41,7 @@ gtm_copilot/
 │
 ├── router/                     # LLM proposes a route, rules decide the guarantee
 │   ├── llm_router.py                Router, RouterDecision
-│   ├── rules.py                     RoutingRule (ABC) + 7 concrete rules, RuleEngine
+│   ├── rules.py                     RoutingRule (ABC) + 9 concrete rules, RuleEngine
 │   ├── slots.py                     slot definitions + raw-text fallback checks
 │   └── prompts.py                   ROUTER_SYSTEM/ROUTER_USER
 │
@@ -70,7 +70,11 @@ gtm_copilot/
 ├── ask/                          # underspecified / follow-up questions
 │   ├── clarify.py                    Clarifier — 1-3 questions + deterministic fallback
 │   ├── reframe.py                    Reframer — continuation vs. pivot after an ASK
-│   └── prompts.py                    CLARIFY_*/REFRAME_*
+│   ├── history_reframe.py            HistoryReframer — follow-ups against the last 1-2 answered
+│   │                                 turns, when NOT following an ASK (mutually exclusive with Reframer)
+│   ├── text_overlap.py               shared merge-safety guards (content_words, preserves_content,
+│   │                                 no_fabricated_entities) — used by both reframers
+│   └── prompts.py                    CLARIFY_*/REFRAME_*/HISTORY_REFRAME_*
 │
 ├── eval/                         # RAGAS-style offline quality evaluation (no LangChain)
 │   ├── metrics.py                    context_recall/precision/relevance, faithfulness, answer_relevancy
@@ -128,12 +132,16 @@ every layer is testable in isolation the moment it exists.
 9. **`hybrid/`** (`verify.py` → `prompts.py` → `composer.py` → `pipeline.py`)
    — depends on `sql.pipeline.SqlPath`, `rag.retrieve.Retriever`,
    `rag.answer.build_context`.
-10. **`ask/`** (`prompts.py` → `clarify.py` → `reframe.py`) — depends on
-    `router.slots.SLOT_QUESTIONS`, `core.llm_client`.
+10. **`ask/`** (`text_overlap.py` → `prompts.py` → `clarify.py` → `reframe.py`
+    → `history_reframe.py`) — depends on `router.slots.SLOT_QUESTIONS`,
+    `router.slots.has_explicit_time`/`has_explicit_population`,
+    `core.llm_client`. Build `text_overlap.py` first — both reframers import
+    its guards.
 11. **`orchestrator.py`** — depends on everything above. Wires one `Router`,
-    one `RuleEngine`, one `RagPath`, one `Clarifier`, one `Reframer`, and a
-    **per-user** cache of `SqlPath`/`HybridPath` (see §9.4 — this is the one
-    piece of shared state that must not be a singleton).
+    one `RuleEngine`, one `RagPath`, one `Clarifier`, one `Reframer`, one
+    `HistoryReframer`, and a **per-user** cache of `SqlPath`/`HybridPath`
+    (see §9.4 — this is the one piece of shared state that must not be a
+    singleton).
 12. **`app.py`** — depends only on `orchestrator` and `core.auth`. Pure
     presentation; if you find yourself importing `router`/`rag`/`sql` here,
     something has leaked.
@@ -166,6 +174,8 @@ One module, no classes, sets `ANONYMIZED_TELEMETRY=False` at import time
 | `ANSWER_MODEL` | `qwen2.5:7b` | `GTM_ANSWER_MODEL` | answering, SQL gen, compose, **clarify** (quality tier) |
 | `LLM_SEED` / `LLM_TEMPERATURE` | `42` / `0.0` | — | every Ollama call |
 | `LLM_TIMEOUT_S` / `LLM_MAX_TOKENS` | `180` / `1024` | — | `_complete` |
+| `LLM_NUM_CTX` | `4096` | — | `_complete`'s `options.num_ctx`. Ollama otherwise defaults to the *model's own* context length (131072 for llama3.2:3b, 32768 for qwen2.5:7b per `ollama show`) — wildly oversized for this system's prompts (a few thousand tokens at most), inflating load time and, on a memory-constrained host, creating pressure that evicts the *other* tier's model between calls. |
+| `LLM_KEEP_ALIVE` | `"30m"` | — | `_complete`'s top-level `keep_alive` field. Ollama's own default (5 min) unloads an idle model, so any gap between chat turns pays full reload cost again. |
 | `EMBED_MODEL` | `BAAI/bge-small-en-v1.5` | — | `rag.index` |
 | `BGE_DOC_PREFIX` / `BGE_QUERY_PREFIX` | `"Represent this document for retrieval: "` / `"...query..."` | — | asymmetric embedding — **do not swap these** |
 | `CHUNK_TARGET_TOKENS` / `TABLE_ROWS_PER_CHUNK` | `300` / `6` | — | `rag.ingest.PdfChunker` |
@@ -241,10 +251,8 @@ dimension is unrestricted into the *full* enum first — never both-unrestricted
 being conflated with "used no ACL at all" (that case returns `None` and skips
 the check entirely).
 
-**Known gap**: both the module docstring and the runtime error message in
-`core/auth.py` point users at `assets/users.example.yaml` as the template to
-copy — that file does not exist in this repo. When rebuilding, either create
-it (a stub with one fake user, no PDF/DB dependency) or drop the reference.
+`assets/users.example.yaml` (sanitized, no real hashes) exists as the
+template both the module docstring and the runtime error message point at.
 
 To generate a password hash: `python -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()).decode())"`.
 
@@ -298,10 +306,10 @@ what lets `GTM_ROUTER_MODEL` be overridden with or without a `:tag` suffix.
 
 **`chat_json` — the JSON repair loop, exactly**: model defaults to
 `self.answer_model` (callers needing the cheap router tier — `Router.decide`,
-`Reframer.reframe` — pass `model=self.router_model` explicitly; `Clarifier`
-does **not** override it, so clarification wording always uses the 7B model
-even though its schema is trivial — a deliberate-or-not asymmetry worth
-knowing). Builds `json_schema = schema.model_json_schema()` and sends it as
+`Reframer.reframe`, `HistoryReframer.reframe` — pass `model=self.router_model`
+explicitly; `Clarifier` does **not** override it, so clarification wording
+always uses the 7B model even though its schema is trivial — a
+deliberate-or-not asymmetry worth knowing). Builds `json_schema = schema.model_json_schema()` and sends it as
 Ollama's `format` field (constrained decoding, not prompt instruction alone).
 Loop over exactly 2 attempts: call `_complete`, try
 `schema.model_validate_json(extract_json(raw))`. On `ValidationError |
@@ -312,8 +320,9 @@ call — success or failure — logs one record to `trace.llm_calls` with stage,
 model, system/user text, attempt count, and `ok`.
 
 **`OllamaClient._complete`**: POSTs `{host}/api/chat`,
-`stream=False`, `options={temperature: 0.0, seed: 42, top_k: 1, top_p: 1.0,
-num_predict: 1024}` (temperature/seed/num_predict from config; top_k/top_p are
+`stream=False`, top-level `keep_alive: "30m"`, `options={temperature: 0.0,
+seed: 42, top_k: 1, top_p: 1.0, num_predict: 1024, num_ctx: 4096}`
+(temperature/seed/num_predict/num_ctx/keep_alive from config; top_k/top_p are
 literals in this file — see the §3 note), and `format=json_schema` when a
 schema was passed. Timeout 180s. Any `requests.RequestException` becomes
 `LLMUnavailable` with an "is `ollama serve` running?" hint plus the exact
@@ -333,8 +342,14 @@ class Trace:
     question: str                          # overwritten with the reframed text on a follow-up turn
     turn_id: str = <uuid4hex[:12]>
     user: str | None = None
+    raw_question: str | None = None        # set once in __post_init__ (defaults to `question`),
+                                            # NEVER mutated again - the user's literal input survives
+                                            # even after either reframe path rewrites `question`
     pending_question: str | None = None    # set only when this turn followed an ASK
     is_new_topic: bool | None = None       # Reframer's verdict
+    history_reframe_applied: bool | None = None  # set only when this turn did NOT follow an ASK
+                                            # and recent_turns was available - HistoryReframer's
+                                            # verdict; mutually exclusive with the two fields above
     llm_proposed_route: str | None = None
     rule_override: str | None = None       # firing rule id, or None if the LLM's route stood
     final_route: str | None = None
@@ -357,6 +372,7 @@ class Trace:
     errors: list[str] = []
     llm_calls: list[dict] = []
 
+    def __post_init__(self) -> None: ...   # if raw_question is None, set it to `question`
     def stage(self, name: str) -> ContextManager: ...   # times a block; warns (doesn't crash) on a duplicate name
     def add_chunks(self, chunks: list[RetrievedChunk]) -> None: ...   # full replace
     def add_llm_call(self, record: dict) -> None: ...                 # append-only
@@ -479,17 +495,20 @@ class RoutingRule(ABC):
 
 class RuleEngine:
     DEFAULT_RULES = (PiiRequestRule, WriteIntentRule, OffDomainRule,
+                      HybridWithoutSqlRule, InvalidPopulationValueRule,
                       MissingSlotRule, RegionScopeRule, VagueTimeRule, LowConfidenceRule)
     def apply(self, decision, question, user) -> RoutingOutcome: ...   # first match wins
 ```
 
-Seven rules, fixed order, first match wins:
+Nine rules, fixed order, first match wins:
 
 | id | fires when | outcome |
 |---|---|---|
 | `R00_PII_REQUEST` | regex hit on SSN/card-number shapes or phrases like "email address", "social security", "date of birth" (deliberately excludes bare "email"/"phone" — legitimate schema values like `channel='Email'`) | REFUSE |
 | `R0_WRITE_INTENT` | regex hit on `delete/drop/truncate/update/insert/upsert/alter/overwrite/wipe/purge`, `remove the row/record`, `set col=`, `grant/revoke` | REFUSE, fires regardless of the LLM's proposed route |
 | `R0B_OFF_DOMAIN` | `decision.route == "OFF_TOPIC"` (trusts the LLM's own classification, no independent check) | REFUSE — runs before `LowConfidenceRule` so a low-confidence OFF_TOPIC can't get downgraded to ASK instead |
+| `R0C_HYBRID_NO_SQL` | route is HYBRID but `sql_subquestion` is unfilled — the router sometimes copies "HYBRID" from a near-identical few-shot example onto a question that's actually pure documentation | downgrade to RAG |
+| `R0D_INVALID_POPULATION_VALUE` | route is SQL/HYBRID, `segment_or_region` is filled with a scalar (not `"all"`, not already a narrowed list) that isn't a real member of `REGIONS ∪ SEGMENTS` — a router hallucination, e.g. filling it with a stage name copied from an unrelated example | clears the slot in place (so `R1_MISSING_SLOT`, next, asks for it properly instead of `R1B_REGION_SCOPE` refusing over a value that was never a real region) |
 | `R1_MISSING_SLOT` | route is SQL/HYBRID and `slots.missing_slots(route, question, decision.slots)` is non-empty | ASK |
 | `R1B_REGION_SCOPE` | route is SQL/HYBRID, the `segment_or_region` slot is filled, and either it equals `"all"` (case-insensitive — **mutates `decision.slots` in place** to the user's actual allowed list) or it names a value outside `user.allowed_scope_values()` | narrows in place and passes through (no rule fires), or REFUSE naming the allowed scope |
 | `R2_VAGUE_TIME` | a vague-time word (`"recently","lately","currently",...`) anywhere, or (SQL/HYBRID only) a superlative (`"top","best","how's",...`) with no explicit time pattern matched and the `time_range` slot unfilled | ASK for `time_range` (+ `segment_or_region` too, if that's also unfilled and unstated) |
@@ -497,17 +516,28 @@ Seven rules, fixed order, first match wins:
 
 If none fire, the LLM's proposed route stands (`rule_id=None`).
 
+**Real failure mode `R0D` exists for**: for the follow-up "and in Discover?",
+the router proposed HYBRID with `slots={"segment_or_region": "Discover"}` —
+"Discover" is a Field Guide stage name, not a region/segment, but it
+superficially resembled the shape of a near-identical few-shot example ("win
+rate for Enterprise..."), and the router copied that example's structure with
+"Discover" substituted into the wrong slot (`doc_subquestion` was even left
+stale, still referencing "Commit" from the example). Left unchecked, this
+reached `R1B_REGION_SCOPE` and refused with "You don't have access to
+Discover" — confusing, since Discover was never a real region/segment to
+begin with.
+
 ### 6.3 `router/slots.py`
 
 A slot is a named required filter. Four are defined: `time_range`,
-`segment_or_region`, `stage_definition`, `product_area`. This module does
-**not** extract slots (the router LLM does, into `RouterDecision.slots`) — it
-*defines* what's required per route and *re-validates* against the raw
-question text as a fallback:
+`segment_or_region`, `stage_definition`, `product_area` — but only three are
+ever *required*; see below. This module does **not** extract slots (the
+router LLM does, into `RouterDecision.slots`) — it *defines* what's required
+per route and *re-validates* against the raw question text as a fallback:
 
 ```python
 def required_slots(route: str, question: str) -> tuple[str, ...]: ...
-    # SQL/HYBRID: (time_range, segment_or_region) [+ stage_definition if is_stage_question]
+    # SQL/HYBRID: (time_range, segment_or_region) — always, never conditional
     # RAG: (product_area,) only if is_ambiguous_doc_question, else ()
 def missing_slots(route: str, question: str, slots: dict) -> list[str]: ...
     # a required slot counts as present if slots[name] is filled,
@@ -515,8 +545,26 @@ def missing_slots(route: str, question: str, slots: dict) -> list[str]: ...
     # OR (for segment_or_region) has_explicit_population(question) is true
     # — this is the "raw-text fallback" that stops the system penalizing the
     # user for the LLM forgetting to copy an obvious filter into slots{}.
+def has_explicit_time(question: str) -> bool: ...          # reused by ask/history_reframe.py too
+def has_explicit_population(question: str) -> bool: ...    # reused by ask/history_reframe.py too
 SLOT_QUESTIONS: dict[str, str]   # hand-written clarification text per slot, with real dataset defaults
 ```
+
+**`stage_definition` is never asked for.** It isn't information only the user
+has: the SQL side can only ever query `opportunities.stage`'s real enum (the
+Field Guide playbook's 6-stage names don't exist in the database), and the
+doc side only ever explains the playbook (the database enum has no exit
+criteria of its own). Which one applies is determined by the *route*, not by
+asking — `sql/generate.py::SqlGenerator.slot_block` forces `"database
+stages"` into the SQL prompt for every SQL/HYBRID call regardless of what the
+router extracted. (An earlier version of this module had an
+`is_stage_question()`/`STAGE_MARKERS` helper that conditionally added
+`stage_definition` to `required_slots()` — removed entirely once the SQL-side
+forcing made asking for it redundant, and it was also a source of a
+production bug: the router would fill `stage_definition` with the *stage
+name itself* — e.g. `"negotiation"` — rather than one of the two real values
+(`"database stages"`/`"playbook"`), and `is_filled()`'s shallow truthy check
+didn't catch it, silently masking a slot that was never actually resolved.)
 
 ### 6.4 `router/prompts.py`
 
@@ -636,14 +684,36 @@ retrieval + one LLM call per RAG turn; no re-ranker, no self-critique loop.
 
 ### 7.5 `rag/prompts.py`
 
-Six hard rules in `RAG_SYSTEM`, the load-bearing one being **rule 4
-(contradiction-flagging)**: if two chunks (or two statements in one chunk)
-disagree, the model must present both positions with both citations and an
-explicit `**Conflict:**` callout — never silently pick a side.
-`CHUNK_TEMPLATE = "--- doc: {doc} | page: {page} | section: {section} ---\n{text}\n"`
-is the exact header format rule 2 tells the model to parse citations from
-(deliberately no "chunk N" ordinal — models sometimes cited their
-position-in-list instead of the real page number when one was present).
+Seven hard rules in `RAG_SYSTEM`. Rule 4 (contradiction-flagging): if two
+chunks (or two statements in one chunk) disagree, the model must present both
+positions with both citations and an explicit `**Conflict:**` callout — never
+silently pick a side. Rule 7 (scope-fidelity, added after a real failure): if
+the question asks about ONE specific item (a stage, product, SKU, tier, …)
+and a retrieved chunk covers SEVERAL items in a table or list, answer ONLY
+the item asked about — never restate the whole table just because it
+happened to be in the chunk handed over. `CHUNK_TEMPLATE = "--- doc: {doc} |
+page: {page} | section: {section} ---\n{text}\n"` is the exact header format
+rule 2 tells the model to parse citations from (deliberately no "chunk N"
+ordinal — models sometimes cited their position-in-list instead of the real
+page number when one was present).
+
+**Both rules 4 and 7 ship a worked example (`_CONTRADICTION_EXAMPLE`,
+`_SCOPE_EXAMPLE`) that is f-string-interpolated into `RAG_SYSTEM` for the
+model to see, but explicitly EXCLUDED from what gets passed to
+`safety.register_prompt(...)`**
+(`RAG_SYSTEM.replace(_CONTRADICTION_EXAMPLE, "").replace(_SCOPE_EXAMPLE, "")`).
+Real failure this fixes: "What deployment modes does Product XYZ support?"
+produced a textbook-correct contradiction answer whose wording closely
+echoed `_CONTRADICTION_EXAMPLE` (as instructed — that's what a correct
+contradiction call-out is supposed to look like) — `core/safety.py`'s
+prompt-leak filter then matched >60 chars of overlap with the *registered*
+system prompt and redacted the entire answer down to `"[redacted: system
+prompt]"`. The fix is not "loosen the filter" (that would weaken real-leak
+detection); it's "don't register the one part of the prompt the model is
+*supposed* to echo." `_SCOPE_EXAMPLE` uses deliberately fictional item names
+("Zeta", "Alpha", "Gamma" tiers) rather than real corpus entities, so if a
+weak model ever echoes it despite the exclusion, the result is an obviously
+wrong placeholder rather than a plausible-looking real answer.
 
 ---
 
@@ -720,6 +790,17 @@ carries forward — not the original input string.
 error, slots)` each make exactly **one** LLM call — no self-consistency
 sampling. `repair()`'s prompt is the full original prompt plus an appended
 block naming the failed SQL and the verbatim SQLite error text.
+
+`SqlGenerator.slot_block(slots)` renders the resolved filters into the
+prompt as explicit "RESOLVED FILTERS" text — and **always forces
+`stage_definition` to the literal string `"database stages"`** if that key
+is present in `slots` at all, regardless of what the router actually
+extracted (`{**slots, STAGE_DEFINITION: "database stages"}` before
+rendering). The database only ever has the 7-value `opportunities.stage`
+enum; the Field Guide's 6-stage playbook names don't exist as data, so
+telling the SQL model anything else would ask it to invent a column value
+with no real equivalent. This is the mechanism `router/slots.py::required_slots`
+(§6.3) relies on to make asking the user for `stage_definition` unnecessary.
 
 `QueryExecutor.execute(sql)` opens
 `sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)` — this is
@@ -826,8 +907,8 @@ construction time; a single shared instance would leak one logged-in user's
 ACL into a concurrent user's query, since Streamlit serves multiple browser
 sessions from one process. `GTMCopilot` keeps `dict[username, SqlPath]` /
 `dict[username, HybridPath]` caches, built lazily on first use per user. Every
-*other* collaborator (`RagPath`, `Clarifier`, `Reframer`, the shared `Index`)
-is user-agnostic and stays a single shared instance.
+*other* collaborator (`RagPath`, `Clarifier`, `Reframer`, `HistoryReframer`,
+the shared `Index`) is user-agnostic and stays a single shared instance.
 
 ---
 
@@ -875,17 +956,150 @@ model claims `is_new_topic=True` but also returned an `effective_question`
 that differs from `reply` (i.e. it rewrote/merged text while also claiming
 "unrelated pivot," which contradicts the prompt's own instruction to return
 the reply *unchanged* on a genuine pivot), the code overrides `is_new_topic`
-to `False` but **keeps the model's rewritten text** rather than falling back
-to naive concatenation — trusting the rewrite over the boolean, on the theory
-that a wrongly-merged question gets safely re-checked by the rule engine
-downstream anyway, while a wrongly-discarded clarification is lost entirely.
+to `False` and treats the model's rewritten text as the merge candidate,
+rather than trusting the contradictory boolean.
+
+**Lossy-merge guard** (runs on that candidate, whichever branch produced it):
+uses `ask/text_overlap.py::content_words` + `preserves_content` to check the
+merge kept most of `pending_question`'s content AND actually incorporated
+`reply`'s own new detail — if either check fails, discard the candidate and
+use the deterministic concatenation fallback instead of a fluent-but-broken
+merge. Two real failures motivated this: (1) a compound pending question
+("count X and explain Y") got paraphrased down to just one half, silently
+dropping the count; (2) after tightening the prompt to fix that, the model
+instead returned `is_new_topic=true` with `effective_question` equal to
+`pending_question` *verbatim* — the self-contradiction guard correctly flips
+that back to a continuation, but the reply's own new content was never
+incorporated, which only the lossy-merge guard catches.
 
 Orchestrator integration: when `pending_clarification` is set,
 `GTMCopilot.answer()` calls `reframe()` before routing, sets
 `trace.pending_question`/`trace.is_new_topic`, computes `effective_question`
 (the reframed merge, or the raw new question if it's a genuine pivot), and
-**overwrites `trace.question`** with it — routing proceeds on the effective
-question, not the user's literal new message.
+**overwrites `trace.question`** with it (`trace.raw_question`, set once at
+`Trace` construction, is unaffected — see §5.2) — routing proceeds on the
+effective question, not the user's literal new message.
+
+### 10.3 `ask/text_overlap.py` — shared merge-safety guards
+
+Extracted out of `ask/reframe.py` once `ask/history_reframe.py` (§10.4)
+needed the identical logic — a rewrite that drops or invents content is
+exactly as dangerous for a general follow-up as it is for an ASK reply.
+
+```python
+def content_words(text: str) -> set[str]: ...
+    # lowercased [a-z0-9]+ tokens, len >= 3, minus a small stopword list
+    # ("the","this","that","what","which","does","should","have","with",
+    # "many","about","into","from","were","will","would","could","when","where")
+    # threshold is >= 3, NOT > 3: a "> 3" cutoff silently drops real 3-letter
+    # domain terms like "SLA" - a follow-up like "What is the SLA days?"
+    # needs "SLA" recognised as content the merge must preserve.
+def preserves_content(source_words, reply_words, merged_words) -> bool: ...
+    # source_ok: len(source_words & merged_words) / len(source_words) >= 0.6
+    # (skipped if source_words is empty)
+    # reply_ok: bool(reply_words & merged_words) (skipped if reply_words is empty)
+    # returns source_ok AND reply_ok
+def no_fabricated_entities(source_words, reply_words, merged_words) -> bool: ...
+    # returns not (merged_words - source_words - reply_words)
+    # i.e. every content word in the merge must be traceable to EITHER the
+    # source context OR the reply - anything else was invented.
+```
+
+`ask/reframe.py` uses `content_words` + `preserves_content` (its "source" is
+the single `pending_question`, which legitimately must survive close to
+intact — see §10.2). `ask/history_reframe.py` uses all three, but see §10.4
+for why it does **not** reuse `preserves_content`'s `source_ok` half as-is.
+
+### 10.4 `ask/history_reframe.py` — follow-ups without a pending ASK
+
+```python
+class HistoryReframeDecision(BaseModel):
+    is_new_topic: bool
+    effective_question: str
+
+class HistoryReframer:
+    def reframe(self, recent_turns: list[dict], question: str, trace) -> HistoryReframeDecision: ...
+        # recent_turns: up to 2 {"question": str, "answer": str} dicts, oldest first
+
+def looks_like_followup(question: str) -> bool: ...
+def _find_stage_span(text: str) -> tuple[str, str] | None: ...
+def _mentioned_stage(text: str) -> str | None: ...
+def _strip_leading_connector(text: str) -> str: ...
+def _bare_stage_substitution(recent_turns, question) -> str | None: ...
+def _substitute_stage(template: str, old_text: str, new_text: str) -> str: ...
+```
+
+**Role and mutual exclusivity.** Closes README's documented gap
+("conversation history is not fed to the router, so 'and for EMEA?' routes
+to ASK"). Runs when `pending_clarification` is **NOT** set (i.e. the turn
+does not follow an ASK) — `orchestrator.py`'s `if pending_clarification: ...
+elif recent_turns: ...` is the structural guarantee that `Reframer` and
+`HistoryReframer` never both run on the same turn. `recent_turns` is
+pre-filtered by the caller (`app.py::recent_answered_turns`, §13) to only
+`SQL`/`RAG`/`HYBRID` turns — an `ASK`/`REFUSE` turn has no factual answer
+worth referencing.
+
+**`looks_like_followup(question)` — the latency gate.** Skips the LLM call
+entirely (the common case: a fresh, self-contained question) unless the
+question starts with a connector phrase (`"and "`, `"what about"`, `"same
+for"`, `"also"`, `"how about"`, `"what if"`, `"compared to"`), contains a
+bare reference pronoun (`"it"`, `"that"`, `"those"`, `"this"`), or is short
+(≤8 words) **and** lacks an explicit entity — reusing
+`router/slots.py::has_explicit_time`/`has_explicit_population`, plus its own
+small stage-name/product-name lists, rather than reinventing entity
+detection. Pure word-count alone was tried and rejected during
+implementation: it flagged fully self-contained short questions ("What
+deployment modes does Product XYZ support?", "How many deals closed in
+2024?") as follow-ups.
+
+**`reframe()` control flow, in order:**
+1. No `recent_turns`, or `not looks_like_followup(question)` → return
+   `is_new_topic=True, effective_question=question` unchanged. Zero LLM
+   calls.
+2. `_bare_stage_substitution(recent_turns, question)` — a **deterministic
+   shortcut**, checked before ever calling the LLM (see below).
+3. Otherwise, one `chat_json(HISTORY_REFRAME_SYSTEM, ..., model=router_model)`
+   call, then four guards.
+4. On `LLMUnavailable`/`LLMJSONError`, or if any guard rejects the merge,
+   fail OPEN to **no rewrite** (`is_new_topic=True, effective_question`
+   unchanged) — deliberately NOT blind concatenation like `ask/reframe.py`'s
+   fallback. Concatenating two full past Q&A pairs onto a new question is
+   noisy garbage; leaving the question as typed can only match today's
+   status quo (worst case, an ASK), never make it worse.
+
+**The four guards (all real production failures, not speculative
+hardening):**
+
+| # | Guard | Real failure it catches |
+|---|---|---|
+| 1 | Self-contradiction (same idea as `ask/reframe.py`, reused inline) | The model reliably returns `is_new_topic=True` even alongside a genuinely correct, non-verbatim rewrite - skipping this guard would silently discard good merges on nearly every real call. |
+| 2 | Reply-inclusion only, **not** full `preserves_content` | `preserves_content`'s `source_ok` check (≥60% of *combined Q+A* content) is too strict here: `recent_turns` includes a full prior ANSWER, and a correct merge naming "Solution Fit" failed that check because the prior answer's exit-criteria prose contributed 16 more content words a follow-up about SLA days has no reason to restate. Only checks the reply's own new content actually survived. |
+| 3 | Fabrication (`no_fabricated_entities`) | History about "EMEA opportunities Closed Won", message "Why is that stage risky?" (no stage anywhere in that history) → the model invented "the Solution Fit stage," copied from its own prompt's worked example. Swapping the example for a fictional "Zeta stage" placeholder just produced a *different* fabricated name - the model reliably invents *something* plausible under-context, so this must be a structural check, not a prompt-wording fix. |
+| 4 | Stale-stage retention, checked against **every** `recent_turns` entry, not just the last | Even with an explicit "don't do this" prompt example, the model produced "What are the exit criteria for Stage 1 - Qualify and in Discover?" - keeping "Qualify" instead of substituting "Discover". With 2 turns in context, a stale merge once retained the *older* turn's stage, not the most recent one - checking only `recent_turns[-1]` would have missed it. |
+
+**`_bare_stage_substitution` — deterministic shortcut, not just a latency
+optimization.** Guard 4 exists because the LLM demonstrably cannot reliably
+substitute a bare stage reference ("what about commit", "and in Discover?")
+even when told not to append instead of replace — so for this one common
+pattern, the code does the substitution itself and skips the LLM entirely:
+finds the new stage named in `question` (`_find_stage_span`, order-sensitive
+— "discovery" checked before "discover" so the longer name isn't
+mis-detected as a substring match), confirms the reply is a *bare* reference
+(nothing left over, once a leading connector is stripped, besides the stage
+name itself — `content_words(remainder) - set(new_key.split())` must be
+empty), then walks `recent_turns` most-recent-first for the first turn whose
+own question names a **different**, **non-bare** stage (skipping a turn
+that's itself just a bare reference — not a usable template) and substitutes.
+
+**`_substitute_stage` also strips a stale "Stage N -" prefix.** A first
+version of the substitution left `"Stage 1 - Qualify"` → `"Stage 1 -
+Discover"` — cosmetically odd, but a *real* regression, not merely
+cosmetic: the stale stage **number** anchored retrieval/the answer model on
+the wrong stage's content, producing a wrong answer (Discover's exit
+criteria came back as Qualify's, mislabeled). `_STAGE_NUMBER_PREFIX_RE =
+r"stage\s*\d+\s*[—\-:]\s*$"` matches only when the prefix sits immediately
+before the matched stage name, so the whole `"Stage 1 - "` span is dropped,
+not just the name.
 
 ---
 
@@ -930,12 +1144,15 @@ class GTMCopilot:
     def __init__(self, client=None, catalog=None, index=None, router=None, rule_engine=None): ...
     def answer(self, question: str, user: UserProfile,
                pending_clarification: str | None = None,
-               pending_missing_slots: list[str] | None = None) -> Answer: ...
+               pending_missing_slots: list[str] | None = None,
+               recent_turns: list[dict] | None = None) -> Answer: ...
     def preflight(self) -> dict: ...   # never raises — sidebar-safe
 ```
 
-One turn: build a `Trace` → (if `pending_clarification`, reframe) → `_route()`
-(one `Router.decide()` call, then `RuleEngine.apply()`, writing every field of
+One turn: build a `Trace` → reframe (`if pending_clarification:` call
+`Reframer`; `elif recent_turns:` call `HistoryReframer` instead — see §10.2/
+§10.4, mutually exclusive by construction) → `_route()` (one
+`Router.decide()` call, then `RuleEngine.apply()`, writing every field of
 the trace along the way) → dispatch to exactly one of REFUSE / ASK / RAG / SQL
 / HYBRID based on `final_route` → wrap the result in `Answer` → `.persisted()`.
 No path calls another path's internals directly — `HybridPath` *holds* a
@@ -972,6 +1189,17 @@ route, both reset to `None`. This is transient Streamlit session state only;
 it is not part of the persisted `messages` chat log and does not survive a
 hard refresh.
 
+**`recent_answered_turns(messages, limit=2) -> list[dict]`**: no new session
+key — derived fresh from the existing `messages` list on every turn, scanning
+backwards for the last `limit` assistant messages whose `route` is
+`SQL`/`RAG`/`HYBRID` (an `ASK`/`REFUSE` turn is skipped; it has no answer
+worth referencing), pairing each with its preceding user message into
+`{"question": ..., "answer": ...}`. Passed as `recent_turns=` on every
+`answer_question()` call, unconditionally — `orchestrator.py`'s
+`if pending_clarification: ... elif recent_turns: ...` is what enforces
+mutual exclusivity with the ASK-continuation path, so `app.py` doesn't need
+its own duplicate conditional here.
+
 **Trace panel**: `st.json` on the trace dict (round-tripped through
 `json.loads(json.dumps(trace, default=str))` so it survives storage in session
 state across reruns without holding live objects); for the current turn, the
@@ -999,7 +1227,8 @@ without any ACL narrowing interfering with a latency or quality measurement.
 
 One test file per module (`test_rrf.py`, `test_sql_guard.py`,
 `test_number_check.py`, `test_chunking.py`, `test_safety.py`,
-`test_reframe.py`, `test_eval_metrics.py`, ...) plus two cross-cutting files:
+`test_reframe.py`, `test_history_reframe.py`, `test_eval_metrics.py`, ...)
+plus two cross-cutting files:
 
 - **`test_pipeline_offline.py`** — full orchestration (router → rules → path
   dispatch → guard → execute → render) against a hand-rolled `StubClient`
@@ -1119,10 +1348,8 @@ the moment a question is labelled with more than one relevant section.
 
 ## 17. Known quirks / open gaps (from verification against live code)
 
-1. **`assets/users.example.yaml` doesn't exist.** Both `core/auth.py`'s
-   module docstring and its runtime "file missing" error message point at it
-   as the template to copy. When rebuilding, either create that stub file
-   (see §4.2 for the exact schema) or remove the dangling reference.
+1. ~~`assets/users.example.yaml` doesn't exist.~~ **Resolved** — the file now
+   exists (sanitized structure, no real hashes; see §4.2 for the schema).
 2. **`rag/retrieve.py`'s docstrings say "top-5"; the live value is
    `RRF_TOP_K=7`.** Not a functional bug — just update the comments if you
    copy this file, or intentionally set it back to 5 if you want the

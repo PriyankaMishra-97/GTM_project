@@ -68,7 +68,7 @@ The system is a **routed pipeline, not a free-form agent**: one user turn takes 
 | `rag/` | `ingest.py` (PDF → chunks), `index.py` (dense + lexical), `retrieve.py` (RRF), `answer.py`, `prompts.py` |
 | `sql/` | `schema.py` (introspection + generated card), `generate.py`, `guard.py`, `execute.py`, `narrate.py`, `pipeline.py`, `prompts.py` |
 | `hybrid/` | `pipeline.py` (fixed 4 steps), `composer.py`, `verify.py` (verbatim-number check), `prompts.py` |
-| `ask/` | `clarify.py`, `reframe.py` (continuation-vs-pivot after an ASK), `prompts.py` |
+| `ask/` | `clarify.py`, `reframe.py` (continuation-vs-pivot after an ASK), `history_reframe.py` (resolves follow-ups like "and for EMEA?" against the last 1-2 answered turns, when NOT following an ASK), `text_overlap.py` (shared merge-safety guards), `prompts.py` |
 | `eval/` | `metrics.py` (RAGAS-style context recall/precision/relevance, faithfulness, answer relevancy), `dataset.py`, `prompts.py` — offline quality evaluation, no LangChain |
 | `orchestrator.py` | wires the above; the only entry point the UI uses |
 | `scripts/` | `ingest.py` (build the index), `demo.py` (headless 5-route run + latency report), `eval.py` (runs `eval/` against the real stack → `EVALUATION.md`) |
@@ -88,7 +88,7 @@ The system is built as collaborating objects, not a bag of functions. Every stag
 | `OllamaClient` | `core/llm_client.py` | the one provider-specific method, `_complete()` |
 | `Trace` | `core/trace.py` | per-turn observability record; `stage()` context manager times each step |
 | `Router` | `router/llm_router.py` | one LLM call → `RouterDecision` (proposal only) |
-| `RoutingRule` (ABC) → `WriteIntentRule`, `MissingSlotRule`, `VagueTimeRule`, `LowConfidenceRule` | `router/rules.py` | one guarantee each; adding a rule is adding a class |
+| `RoutingRule` (ABC) → `PiiRequestRule`, `WriteIntentRule`, `OffDomainRule`, `HybridWithoutSqlRule`, `InvalidPopulationValueRule`, `MissingSlotRule`, `RegionScopeRule`, `VagueTimeRule`, `LowConfidenceRule` | `router/rules.py` | one guarantee each; adding a rule is adding a class |
 | `RuleEngine` | `router/rules.py` | runs rules in order, first match wins |
 | `PdfChunker` | `rag/ingest.py` | PDF → structure-aware `Chunk` objects |
 | `Index` | `rag/index.py` | owns the dense + lexical indexes: build, load, embed |
@@ -104,6 +104,7 @@ The system is built as collaborating objects, not a bag of functions. Every stag
 | `HybridPath` | `hybrid/pipeline.py` | composes `SqlPath` + `Retriever` + `Composer` |
 | `Clarifier` | `ask/clarify.py` | ASK branch, with a deterministic fallback |
 | `Reframer` | `ask/reframe.py` | after an ASK, decides if the next message answers it (merge) or pivots (route fresh) |
+| `HistoryReframer` | `ask/history_reframe.py` | when NOT following an ASK, resolves a follow-up against the last 1-2 answered turns - mutually exclusive with `Reframer` |
 | `UserProfile` / `UserStore` | `core/auth.py` | bcrypt login + per-user region/segment ACL, threaded into every turn |
 | `GTMCopilot` | `orchestrator.py` | assembles everything; `answer(question, user) -> Answer` |
 
@@ -295,9 +296,14 @@ Every turn appends one JSON line to `storage/traces.jsonl` and renders the same 
 {
   "turn_id": "a3f19c2b81d0",
   "question": "How's pipeline looking recently?",
+  "raw_question": "How's pipeline looking recently?",  // the user's literal input,
+                                                        // never overwritten even if
+                                                        // either reframe path rewrites `question`
   "llm_proposed_route": "SQL",       // what the model wanted
   "rule_override": "R2_VAGUE_TIME",  // what the rule engine did
   "final_route": "ASK",
+  "history_reframe_applied": null,   // set only when NOT following an ASK and
+                                      // recent_turns was available - see HistoryReframer
   "slots": {}, "missing_slots": ["time_range", "segment_or_region"],
   "retrieved_chunks": [{"chunk_id": "...", "doc": "...", "page": 3, "rrf_score": 0.0325}],
   "generated_sql": null, "guard_verdict": null, "rows_returned": null,
@@ -324,8 +330,9 @@ Every turn appends one JSON line to `storage/traces.jsonl` and renders the same 
 
   The spread is the headline finding: the same code is 3× slower when the machine is busy, because a local 7B competes for the same RAM and GPU as everything else. Routing alone moves from 1.2 s to 6.7 s. Two other costs are visible in the per-stage numbers: the first RAG turn pays ~10 s to load the sentence-transformers model (lazy, once per process), and HYBRID's composer is a single ~16 s generation call.
 
-  The mitigations already in the design — 3B router, table-only rendering for small factual results, the `num_predict` cap, one-retry caps everywhere — are what buy the best case. Getting the rest of the way needs either more machine or a hosted model: the sibling `gtm_copilot_gemini` build puts every route inside the target because Flash answers in 1-3 s, at the cost of sending prompts off the laptop.
-- **Single-shot routing.** One classification per turn, no re-route if the chosen path turns out to be wrong. A question that is 80% docs and 20% numbers gets whichever the router picked. Conversation history is also not fed to the router, so follow-ups like "and for EMEA?" are treated as fresh questions and will usually route to ASK.
+  The mitigations already in the design — 3B router, table-only rendering for small factual results, the `num_predict` cap, one-retry caps everywhere, and an explicit `num_ctx=4096`/`keep_alive=30m` on every Ollama call (`core/config.py` — the model default of 32k-131k tokens of context was pure waste for prompts a few thousand tokens long, and inflated both load time and memory pressure) — are what buy the best case. Getting the rest of the way needs either more machine or a hosted model: the sibling `gtm_copilot_gemini` build puts every route inside the target because Flash answers in 1-3 s, at the cost of sending prompts off the laptop.
+- **Single-shot routing.** One classification per turn, no re-route if the chosen path turns out to be wrong. A question that is 80% docs and 20% numbers gets whichever the router picked.
+- **Multi-turn context is bounded and best-effort.** `ask/history_reframe.py`'s `HistoryReframer` resolves follow-ups like "and for EMEA?" or a bare stage reference ("what about commit") against the last 1-2 answered turns — but only when it's confident: a cheap heuristic skips the LLM call entirely for self-contained questions, and guards against self-contradiction, fabricated entities, dropped reply content, and stale-entity retention mean an ambiguous follow-up falls back to being routed as typed (worst case, an ASK) rather than risk a wrong merge. It's mutually exclusive with the ASK-continuation `Reframer` (`ask/reframe.py`) — a turn following an ASK never also consults `HistoryReframer`, and vice versa.
 - **Fixed hybrid pipeline.** SQL runs once, then docs run once. It cannot notice that the SQL result makes a *different* document question interesting, or refine the query based on what the docs said. That is the deliberate trade for determinism and a bounded call count.
 - **Schema-card drift.** The factual sections are generated from the live DB, so tables, columns, enum strings and join keys cannot drift. The business definitions remain hand-written: `validate_card()` flags prose that names a column which no longer exists, but it cannot catch a *semantic* drift — e.g. if "Closed Won" were renamed to "Won", the generated enum list would update while the card's hand-written definition of win rate silently became wrong.
 - **Retrieval is corpus-shaped.** Chunking was tuned for these two short, heavily-tabular PDFs. A 200-page contract corpus would want a re-ranker and larger chunks.

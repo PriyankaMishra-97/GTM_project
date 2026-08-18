@@ -24,12 +24,17 @@ They fail differently. A wrong doc answer is a wrong sentence someone can check.
 question → LLM router (3B) → rule engine (deterministic override) → RAG | SQL | HYBRID | ASK | REFUSE → safety filter → answer + trace
 ```
 
-The router *proposes*; `router/rules.py` *disposes*. Four rules, fixed order, first match wins, firing rule ID recorded in the trace:
+The router *proposes*; `router/rules.py` *disposes*. Nine rules, fixed order, first match wins, firing rule ID recorded in the trace:
 
 | Rule | Fires when | Result |
 |---|---|---|
+| `R00_PII_REQUEST` | question asks for personal PII | **REFUSE** |
+| `R0B_OFF_DOMAIN` | router itself classified the question as out of scope | **REFUSE** |
 | `R0_WRITE_INTENT` | delete/update/insert/drop/… in the question | **REFUSE** (no SQL is ever generated) |
-| `R1_MISSING_SLOT` | SQL/HYBRID with no time range, no region/segment, or an ambiguous stage taxonomy | **ASK** |
+| `R0C_HYBRID_NO_SQL` | HYBRID proposed but `sql_subquestion` is empty - nothing to compute | downgrade to **RAG** |
+| `R0D_INVALID_POPULATION_VALUE` | `segment_or_region` filled with something that isn't a real region/segment (a router hallucination, e.g. a stage name) | cleared, so R1 asks for it properly |
+| `R1_MISSING_SLOT` | SQL/HYBRID with no time range or no region/segment | **ASK** |
+| `R1B_REGION_SCOPE` | SQL/HYBRID names a region/segment outside the logged-in user's ACL | **REFUSE** ("all" narrows in place instead) |
 | `R2_VAGUE_TIME` | "recently", "lately", "top", "best", "how's" with no explicit period | **ASK** |
 | `R3_LOW_CONFIDENCE` | router confidence < 0.60 | **ASK** |
 
@@ -53,7 +58,7 @@ This split is the core bet: **use the LLM for intent, never for guarantees.** An
 
 ## 3a. Code shape
 
-Data is modelled with dataclasses and pydantic (`Trace`, `GuardResult`, `QueryResult`, `Chunk`, `Hit`, `RouterDecision`, `Answer`); behaviour is modelled with classes that take their collaborators in the constructor (`Router`, `RuleEngine`, `Retriever`, `SqlGuard`, `SqlPath`, `HybridPath`, `Composer`, `GTMCopilot`).
+Data is modelled with dataclasses and pydantic (`Trace`, `GuardResult`, `QueryResult`, `Chunk`, `Hit`, `RouterDecision`, `Answer`); behaviour is modelled with classes that take their collaborators in the constructor (`Router`, `RuleEngine`, `Retriever`, `SqlGuard`, `SqlPath`, `HybridPath`, `Composer`, `Reframer`, `HistoryReframer`, `GTMCopilot`).
 
 Inheritance is used exactly where it pays for itself:
 
@@ -64,7 +69,7 @@ Everywhere else the answer is composition, not a class hierarchy: `GTMCopilot` h
 
 ## 4. Observability
 
-One `Trace` per turn, appended to `storage/traces.jsonl` and shown in a collapsible panel: proposed route, rule override + rule ID, final route, slots, retrieved chunk IDs with RRF scores, generated SQL, guard verdict, rows returned, repair attempted, number-check result, per-stage and total latency. The **proposed vs. final** pair is the important one: it makes disagreements between the model and the rules visible instead of invisible.
+One `Trace` per turn, appended to `storage/traces.jsonl` and shown in a collapsible panel: the raw question as typed (`raw_question`, never overwritten) alongside the effective/routed question (`question`, which a reframe path may rewrite), proposed route, rule override + rule ID, final route, whether `HistoryReframer` applied a rewrite, slots, retrieved chunk IDs with RRF scores, generated SQL, guard verdict, rows returned, repair attempted, number-check result, per-stage and total latency. The **proposed vs. final** pair is the important one: it makes disagreements between the model and the rules visible instead of invisible.
 
 ## 5. Determinism
 
@@ -73,7 +78,7 @@ One `Trace` per turn, appended to `storage/traces.jsonl` and shown in a collapsi
 ## 6. What this design cannot do
 
 - **Iterate.** Hybrid runs SQL once, then docs once. It cannot refine the query based on what the documents said.
-- **Follow up.** The router sees one question, not the conversation. "And for EMEA?" is treated as a fresh question and will usually route to ASK.
+- **Follow up with full confidence.** `ask/history_reframe.py`'s `HistoryReframer` resolves a bounded class of follow-ups - "and for EMEA?", a bare stage reference ("what about commit") - against the last 1-2 answered turns, so these no longer route to a needless ASK. But it's guarded, not omniscient: a heuristic gate skips the LLM call for questions that already look self-contained, and several checks (self-contradiction, fabricated entities, dropped content, stale-entity retention) reject an ambiguous or wrong merge rather than risk one - falling back to routing the question as typed. It also only ever sees SQL/RAG/HYBRID turns (ASK/REFUSE carry no answer worth referencing), and is mutually exclusive with the ASK-continuation `Reframer` in `ask/reframe.py`.
 - **Beat its own latency floor.** Local 7B generation dominates every turn that needs it, and it competes with whatever else the laptop is doing: measured warm runs ranged from 3/5 routes inside the 10 s target on an idle machine to 1/5 on a busy one. `MEASUREMENTS.md` has the per-stage breakdown; the numbers are reported rather than rounded down. The Gemini build is the escape hatch.
 - **Catch semantic schema drift.** The card's factual sections are generated from live introspection, so structural drift cannot happen; `validate_card()` additionally flags hand-written prose naming a column that no longer exists. Neither catches a changed *meaning* (e.g. if `'Closed Won'` were renamed, the generated enum list would follow but the hand-written win-rate definition would silently be wrong).
 - **Enforce row-level security.** The Field Guide describes ACLs and RLS; this prototype has a column denylist only, because the synthetic data has no per-user ownership model.
