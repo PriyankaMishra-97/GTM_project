@@ -13,6 +13,8 @@ Out: (markdown answer, number_check_passed).
 
 from __future__ import annotations
 
+import re
+
 from core import safety
 from core.llm_client import LLMClient, LLMUnavailable, get_client
 from core.trace import Trace
@@ -32,11 +34,45 @@ class Composer:
         self.client = client or get_client()
         self.verifier = verifier or NumberVerifier()
 
+    _ROW_RE = re.compile(r"^\d+\s*[—-]")  # table data rows: "1 — Qualify | ...", "2 - Discover | ..."
+    _SEPARATOR_RE = re.compile(r"^[\s|:-]+$")  # "TABLE" header/dash-rule rows, no real content
+
     @staticmethod
-    def fallback(sql: str, result: QueryResult, hits: list[Hit]) -> str:
+    def _snippet(text: str, question: str, limit: int = 180) -> str:
+        """Pick the content line most relevant to the question for a fallback citation.
+
+        A multi-row table chunk (e.g. the Stage Playbook holds all 6 stages in
+        one chunk) makes `splitlines()[-1]` arbitrary - it can show a
+        completely unrelated row (e.g. "Closed Won" for a question about
+        "Discover"). Score candidate lines by substring overlap with the
+        question's words (not exact match, so "discovery" still finds a row
+        titled "Discover"), preferring numbered table rows over the header/
+        column-title row when both are present.
+        """
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        lines = lines[1:] or lines  # drop the section heading; it repeats h.section
+        rows = [ln for ln in lines if Composer._ROW_RE.match(ln.strip())]
+        candidates = rows or [ln for ln in lines if not Composer._SEPARATOR_RE.match(ln)] or lines
+
+        q_words = [w.strip(".,;:—-").lower() for w in question.split() if len(w) > 3]
+
+        def overlap(ln: str) -> int:
+            ln_words = [w.strip(".,;:—-").lower() for w in ln.split()]
+            return sum(
+                1
+                for qw in q_words
+                for lw in ln_words
+                if len(lw) > 3 and (qw in lw or lw in qw)
+            )
+
+        best_line = max(candidates, key=overlap, default=text)
+        return best_line[:limit]
+
+    @staticmethod
+    def fallback(sql: str, result: QueryResult, hits: list[Hit], question: str = "") -> str:
         """Deterministic, generation-free rendering of both verified sources."""
         cites = "\n".join(
-            f"- {h.citation()} {h.section or '-'}: {h.text.splitlines()[-1][:180]}"
+            f"- {h.citation()} {h.section or '-'}: {Composer._snippet(h.text, question)}"
             for h in hits[:3]
         )
         return (
@@ -74,9 +110,10 @@ class Composer:
                 )
             )
         except LLMUnavailable:
-            return self.fallback(sql, result, hits), False
+            return self.fallback(sql, result, hits, question), False
 
-        verdict = self.verifier.check(text, result, context=ctx)
+        doc_texts = [h.text for h in hits]
+        verdict = self.verifier.check(text, result, context=ctx, doc_texts=doc_texts)
         if verdict.ok:
             return text, True
 
@@ -93,12 +130,12 @@ class Composer:
                 )
             )
         except LLMUnavailable:
-            return self.fallback(sql, result, hits), False
+            return self.fallback(sql, result, hits, question), False
 
-        if self.verifier.check(text2, result, context=ctx).ok:
+        if self.verifier.check(text2, result, context=ctx, doc_texts=doc_texts).ok:
             return text2, True
 
-        return self.fallback(sql, result, hits), False
+        return self.fallback(sql, result, hits, question), False
 
 
 def compose(

@@ -104,6 +104,16 @@ def test_citation_page_number_is_not_a_claim() -> None:
     assert verdict.ok
 
 
+def test_citation_page_number_with_space_is_not_a_claim() -> None:
+    """The composer LLM sometimes paraphrases citations as "p. 4" (space after
+    the period) instead of Hit.citation()'s "p.4" - the page number must still
+    not be treated as an ungrounded numeric claim."""
+    verdict = check_numbers(
+        "EMEA closed 128 deals [Field Guide, p. 4].", _result()
+    )
+    assert verdict.ok
+
+
 def test_fabricated_number_still_caught_next_to_a_citation() -> None:
     verdict = check_numbers(
         "EMEA closed 999 deals [Field Guide, p.3].", _result()
@@ -111,3 +121,51 @@ def test_fabricated_number_still_caught_next_to_a_citation() -> None:
     assert not verdict.ok
     assert "999" in verdict.offending
     assert "3" not in verdict.offending
+
+
+def test_number_grounded_only_in_doc_chunk() -> None:
+    """A real, cited number that lives only in a doc chunk is not fabricated."""
+    verdict = check_numbers(
+        "The resolution SLA is 14 days.",
+        _result(),
+        doc_texts=["Stage progression playbook: the resolution SLA is 14 days."],
+    )
+    assert verdict.ok
+
+
+def test_number_not_in_result_or_doc_chunks_still_fails() -> None:
+    """doc_texts must not make the check permissive by default."""
+    verdict = check_numbers(
+        "The resolution SLA is 14 days.",
+        _result(),
+        doc_texts=["Stage progression playbook has no SLA figures here."],
+    )
+    assert not verdict.ok
+    assert "14" in verdict.offending
+
+
+def test_number_across_multiple_doc_chunks() -> None:
+    """Every chunk in doc_texts is scanned, not just the first."""
+    verdict = check_numbers(
+        "The rubric totals 42 points.",
+        _result(),
+        doc_texts=["Executive summary, no numbers.", "Risk rubric totals 42 points.", "FAQ."],
+    )
+    assert verdict.ok
+
+
+def test_doc_texts_default_omitted_no_behavior_change() -> None:
+    """Omitting doc_texts entirely preserves today's behavior exactly."""
+    verdict = check_numbers("EMEA closed 999 deals.", _result())
+    assert not verdict.ok
+    assert "999" in verdict.offending
+
+
+def test_doc_texts_normalises_currency_and_separators() -> None:
+    """doc_texts reuses the same normalisation as every other grounding source."""
+    verdict = check_numbers(
+        "The deal was worth 12500.",
+        _result(),
+        doc_texts=["Deal value: $12,500"],
+    )
+    assert verdict.ok

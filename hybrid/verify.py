@@ -21,14 +21,28 @@ NORMALISATION POLICY (documented because it is a judgement call)
   * page numbers inside a citation bracket ("[Field Guide, p.3]") are ignored -
     they identify a source location, not a data claim.
 
-In:  generated text + QueryResult (+ optional question/sql context).
+In:  generated text + QueryResult (+ optional question/sql context, + optional
+     retrieved doc-chunk text).
 Out: `NumberCheck(ok, offending)`.
+
+DOC-CHUNK GROUNDING
+  A number is also allowed if it appears verbatim in `doc_texts` (the text of
+  the retrieved RAG chunks, e.g. `[h.text for h in hits]`) - a real, correctly
+  cited number that only lives in a doc (an SLA day count, a risk-rubric
+  threshold) must not be flagged as fabricated just because it isn't in the
+  SQL result. This checks the number against the POOL of all retrieved chunks,
+  not the specific chunk the answer cites for that claim - the composer
+  prompt already hands the model every hit's full text as legitimate source
+  material (see `build_context()` in hybrid/composer.py), so this only
+  extends the verifier's trust boundary to match what the prompt already
+  grants; it does not let the model draw from anything new.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Sequence
 
 from sql.execute import QueryResult
 
@@ -36,8 +50,11 @@ from sql.execute import QueryResult
 _NUMBER_RE = re.compile(r"[-+]?\$?\d[\d,]*(?:\.\d+)?%?")
 # "1. " / "2) " at the start of a line = list marker, not a claim.
 _LIST_MARKER_RE = re.compile(r"^\s*[-*]?\s*\d+[.)]\s", re.MULTILINE)
-# "[Field Guide, p.3]" - a citation built from Hit.citation(), not a numeric claim.
-_CITATION_RE = re.compile(r"\[[^\[\]]*?\bp\.\d+[^\[\]]*?\]")
+# "[Field Guide, p.3]" - a citation built from Hit.citation(), not a numeric
+# claim. Hit.citation() itself never puts a space after "p.", but the
+# composer LLM sometimes paraphrases citations as "p. 4" - tolerate an
+# optional space so that page number isn't treated as an ungrounded claim.
+_CITATION_RE = re.compile(r"\[[^\[\]]*?\bp\.\s?\d+[^\[\]]*?\]")
 
 
 @dataclass
@@ -61,7 +78,9 @@ def _decimals(token: str) -> int:
     return len(body.split(".")[1]) if "." in body else 0
 
 
-def _allowed_values(result: QueryResult, extra_text: str) -> set[float]:
+def _allowed_values(
+    result: QueryResult, extra_text: str, doc_texts: Sequence[str] = ()
+) -> set[float]:
     """Every number the model is licensed to state."""
     values: set[float] = set()
     for cell in result.flat_values():
@@ -82,6 +101,15 @@ def _allowed_values(result: QueryResult, extra_text: str) -> set[float]:
         v, _ = _to_float(tok)
         if v is not None:
             values.add(v)
+    # Numbers verbatim in a retrieved doc chunk are real, cited facts (an SLA
+    # day count, a risk-rubric threshold) - not fabrications just because
+    # they aren't in the SQL result. See module docstring for the pooled-
+    # across-all-chunks tradeoff this accepts.
+    for chunk in doc_texts:
+        for tok in _NUMBER_RE.findall(chunk):
+            v, _ = _to_float(tok)
+            if v is not None:
+                values.add(v)
     return values
 
 
@@ -113,10 +141,24 @@ class NumberVerifier:
     paths enforce exactly the same policy.
     """
 
-    def check(self, text: str, result: QueryResult, *, context: str = "") -> NumberCheck:
-        """Assert every numeric token in `text` is grounded. Never raises."""
+    def check(
+        self,
+        text: str,
+        result: QueryResult,
+        *,
+        context: str = "",
+        doc_texts: Sequence[str] = (),
+    ) -> NumberCheck:
+        """Assert every numeric token in `text` is grounded. Never raises.
+
+        `doc_texts` (e.g. `[h.text for h in hits]`) is an additional, optional
+        grounding source: numbers found there are treated as real cited facts,
+        same as SQL result cells / row_count / `context`. Defaults to `()` so
+        callers with no retrieved chunks (e.g. sql/narrate.py's SQL-only path)
+        are unaffected.
+        """
         stripped = _LIST_MARKER_RE.sub("\n", _CITATION_RE.sub("", text or ""))
-        allowed = _allowed_values(result, context)
+        allowed = _allowed_values(result, context, doc_texts)
         offending = [
             tok for tok in _NUMBER_RE.findall(stripped) if not _matches(tok, allowed)
         ]
@@ -126,6 +168,12 @@ class NumberVerifier:
         return NumberCheck(ok=not unique, offending=unique)
 
 
-def check_numbers(text: str, result: QueryResult, *, context: str = "") -> NumberCheck:
+def check_numbers(
+    text: str,
+    result: QueryResult,
+    *,
+    context: str = "",
+    doc_texts: Sequence[str] = (),
+) -> NumberCheck:
     """Module-level convenience wrapper around `NumberVerifier`."""
-    return NumberVerifier().check(text, result, context=context)
+    return NumberVerifier().check(text, result, context=context, doc_texts=doc_texts)
